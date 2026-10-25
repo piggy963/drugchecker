@@ -1,0 +1,10 @@
+.env
+.env.*
+.git
+.venv
+venv
+tests
+**/__pycache__
+**/*.pyc
+**/*:Zone.Identifier
+requirements-dev.txt

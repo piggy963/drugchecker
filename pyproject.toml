@@ -6,3 +6,7 @@ include = ["agent", "tests"]
 typeCheckingMode = "standard"
 venvPath = "."
 venv = ".venv"
+
+# Vercel's Python runtime serves this FastAPI application at the project root.
+[tool.vercel]
+entrypoint = "agent/server.py"

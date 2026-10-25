@@ -154,6 +154,30 @@ def register(app: FastAPI) -> None:
 
 **If it fails:** 401 means the token in your environment doesn't match your team page (rotate it there and copy again). "doesn't handle … yet" means that handler is still the placeholder. The full protocol is in the [verification guide](https://github.com/Db0706/superteam-agent-studio/blob/main/docs/VERIFICATION_SDK.md).
 
+### Deploy for the competition (Vercel)
+
+The competition platform verifies your app but does not host it. This repository is configured for Vercel's native FastAPI runtime through `pyproject.toml` and `vercel.json`.
+
+1. Push this repository to GitHub, then in [Vercel](https://vercel.com/new) import `piggy963/drugchecker` with the repository root as the project root. No framework preset, build command, output directory, or start command is needed.
+2. In the Vercel project's **Settings → Environment Variables**, add at least:
+   - `AGENT_STUDIO_VERIFIER_TOKEN`: copy it from your Agent Studio team page.
+   - `AGENT_STUDIO_APP_NAME`: `drugchecker`.
+   - `GEMINI_API_KEY`: required once the `respond` handler is implemented.
+   - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`: required for reliable memory tasks on serverless hosting.
+   - Payment variables from `.env.example` if you enter the on-chain payment stage.
+3. Deploy and use the final production URL, for example `https://drugchecker.vercel.app`. Do not use a preview URL that may change.
+4. On your Agent Studio team page, paste that URL into the app URL field and run **Test connection**. Then run verification for **App live** on the [race page](https://superteam-agent-studio.vercel.app/race).
+
+You can check the deployment yourself without exposing the token in the URL:
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $AGENT_STUDIO_VERIFIER_TOKEN" \
+  https://YOUR-PROJECT.vercel.app/agent-studio/v1/health
+```
+
+A correct deployment returns HTTP 200 with `"protocol":"asrp/1"` and `"status":"ready"`. Vercel redeploys automatically after later pushes to the connected production branch.
+
 ---
 
 ## Spending controls
