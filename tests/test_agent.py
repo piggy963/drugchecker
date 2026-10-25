@@ -36,7 +36,8 @@ class AgentTest(unittest.TestCase):
     def test_home_is_a_page_for_browsers(self) -> None:
         media_type, body = get_home("text/html,application/xhtml+xml,*/*;q=0.8")
         self.assertEqual(media_type, "text/html")
-        self.assertIn(b"is running", body)
+        self.assertIn(b"POST /api/check", body)
+        self.assertIn(b'id="check-form"', body)
 
     def test_every_route_file_loaded(self) -> None:
         paths = {getattr(route, "path", None) for route in app.routes}
