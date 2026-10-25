@@ -144,7 +144,7 @@ def register(app: FastAPI) -> None:
 **Setup:**
 
 1. On Agent Studio, open your team page and copy the **verifier token** into `.env` as `AGENT_STUDIO_VERIFIER_TOKEN`, then restart `python -m agent serve`.
-2. Write the `respond` handler (the first layer), for example with the Gemini module: return `{"text": await ask_gemini(str(task["input"]))}`.
+2. Add `GEMINI_API_KEY` to the deployment environment. The included `respond` handler sends `task.input` to Gemini and returns the answer in `output.text`.
 3. Try it locally: `python -m agent race respond "What is 6 x 7?"` (with `python -m agent serve` running).
 4. Deploy (for example to Railway or Render, adding the same env var) and paste the public URL on your team page. Then press **Run verification** on the race page.
 

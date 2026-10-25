@@ -7,9 +7,11 @@ Each race layer tests a capability, and building it is the challenge. The race p
 layer's instructions and what must work. Use any AI model you like.
 """
 
+import asyncio
+import logging
+import re
 from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
-import re
 from typing import Any
 
 from .protocol import Task, TaskError, TaskOutput, TaskType
@@ -19,6 +21,10 @@ from .protocol import Task, TaskError, TaskOutput, TaskType
 
 Handler = Callable[[Task, dict[str, Any]], Awaitable[TaskOutput]]
 _NOT_BUILT: set[Handler] = set()
+logger = logging.getLogger("agent")
+
+_RESPOND_TIMEOUT_SECONDS = 15
+_MAX_RESPOND_INPUT_CHARS = 8_000
 
 _PAYMENT_TASK = re.compile(
     r'^\s*Pay\s+(?P<amount>\d+(?:\.\d{1,6})?)\s+devnet\s+USDC\s+to\s+'
@@ -42,6 +48,48 @@ def not_yet(task_type: TaskType) -> Handler:
 
 def is_built(task_type: TaskType) -> bool:
     return HANDLERS[task_type] not in _NOT_BUILT
+
+
+def _respond_prompt(user_input: str) -> str:
+    return (
+        "You are DrugChecker, a careful drug-discovery research assistant. "
+        "Answer the user's request accurately and follow its requested output format exactly. "
+        "For arithmetic or exact-format instructions, return only the requested answer with no explanation.\n\n"
+        f"User request:\n{user_input}"
+    )
+
+
+async def _answer_with_model(user_input: str) -> str:
+    # Lazy import keeps the health endpoint available even if an optional model
+    # dependency or key is missing in a deployment.
+    from agent.ai.gemini import MissingGeminiKeyError, ask_gemini
+
+    try:
+        answer = await asyncio.wait_for(
+            ask_gemini(_respond_prompt(user_input)),
+            timeout=_RESPOND_TIMEOUT_SECONDS,
+        )
+    except MissingGeminiKeyError as err:
+        raise TaskError("upstream_unavailable", str(err)) from err
+    except TimeoutError as err:
+        raise TaskError("upstream_timeout", "The AI model did not answer in time.") from err
+    except Exception as err:
+        logger.exception("Gemini respond request failed")
+        raise TaskError("upstream_unavailable", "The AI model request failed.") from err
+
+    answer = answer.strip()
+    if not answer:
+        raise TaskError("upstream_unavailable", "The AI model returned an empty answer.")
+    return answer
+
+
+async def respond(task: Task, _request: dict[str, Any]) -> TaskOutput:
+    task_input = task.get("input")
+    if not isinstance(task_input, str) or not task_input.strip():
+        raise TaskError("invalid_input", "A respond task requires non-empty text input.")
+    if len(task_input) > _MAX_RESPOND_INPUT_CHARS:
+        raise TaskError("invalid_input", f"Respond input cannot exceed {_MAX_RESPOND_INPUT_CHARS} characters.")
+    return {"text": await _answer_with_model(task_input.strip())}
 
 
 def _parse_payment_task(task: Task) -> tuple[str, Decimal, str]:
@@ -122,9 +170,8 @@ async def run_payment_workflow(task: Task, _request: dict[str, Any]) -> TaskOutp
 
 
 HANDLERS: dict[TaskType, Handler] = {
-    # First Intelligence: answer task["input"] (a question) with your AI model, in "text".
-    #   async def respond(task, _request): return {"text": await ask_gemini(str(task["input"]))}
-    "respond": not_yet("respond"),
+    # First Intelligence: answer task["input"] with Gemini in output.text.
+    "respond": respond,
     # Structured Outputs: turn task["input"] into JSON matching task["schema"] exactly, in "data".
     # Missing input or schema? raise TaskError("invalid_input", "...").
     "extract": not_yet("extract"),

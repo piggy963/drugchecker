@@ -72,6 +72,30 @@ class RaceAdapterTest(unittest.TestCase):
         self.assertIn('doesn\'t handle "converse" tasks yet', body["error"]["message"])
         self.assertFalse(h.is_built("converse"))
 
+    def test_respond_uses_model_and_protocol_envelope(self) -> None:
+        model = AsyncMock(return_value="42")
+        with patch.object(h, "_answer_with_model", model):
+            status, body = asyncio.run(handle_task(AUTH, request({"type": "respond", "input": "  What is 19 plus 23?  "}), ENV))
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            body,
+            {
+                "protocol": "asrp/1",
+                "nonce": "nonce-0123456789abcdef",
+                "status": "ok",
+                "output": {"text": "42"},
+            },
+        )
+        model.assert_awaited_once_with("What is 19 plus 23?")
+        self.assertTrue(h.is_built("respond"))
+
+    def test_respond_rejects_empty_input_without_calling_model(self) -> None:
+        model = AsyncMock()
+        with patch.object(h, "_answer_with_model", model):
+            status, body = asyncio.run(handle_task(AUTH, request({"type": "respond", "input": "  "}), ENV))
+        self.assertEqual((status, body["error"]["code"]), (400, "invalid_input"))
+        model.assert_not_awaited()
+
     def test_payment_workflow_uses_exact_task_values(self) -> None:
         recipient = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
         task = {
