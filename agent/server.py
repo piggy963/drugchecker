@@ -30,8 +30,13 @@ async def home(request: Request) -> Response:
     return JSONResponse({"service": "superteam-agent", "modules": modules})
 
 
-for route in load_plugins(routes):
-    route.register(app)
+for route in load_plugins(routes, tolerate_errors=True):
+    try:
+        route.register(app)
+    except Exception:
+        # An optional integration must not take down the race health endpoint.
+        # The traceback remains available in the host's runtime logs.
+        logger.exception("Optional route plugin %s could not be registered", route.__name__)
 
 
 @app.exception_handler(HTTPException)

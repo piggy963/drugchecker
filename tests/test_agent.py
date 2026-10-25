@@ -41,6 +41,7 @@ class AgentTest(unittest.TestCase):
     def test_every_route_file_loaded(self) -> None:
         paths = {getattr(route, "path", None) for route in app.routes}
         self.assertIn("/", paths)
+        self.assertIn("/agent-studio/v1/health", paths)
 
     def test_command_line_parses(self) -> None:
         args = build_parser().parse_args(["serve"])
