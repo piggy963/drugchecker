@@ -117,6 +117,70 @@ class RaceAdapterTest(unittest.TestCase):
             status, body = asyncio.run(handle_task(AUTH, request({"type": "respond", "input": "Explain aspirin."}), ENV))
         self.assertEqual((status, body["error"]["code"]), (503, "upstream_unavailable"))
 
+    def test_use_tools_calls_each_service_and_computes_total(self) -> None:
+        task = {
+            "type": "use_tools",
+            "input": (
+                "Look up records rec-a and rec-b with lookup_record. Add their amounts (both in the same currency) "
+                'and convert the total to GBP with exchange_rate. Return { "totalGbp": number } in output.data.'
+            ),
+            "tools": [
+                {"name": "lookup_record", "url": "https://tools.test/lookup"},
+                {"name": "exchange_rate", "url": "https://tools.test/rate"},
+            ],
+            "challengeToken": "fresh-challenge-token",
+        }
+        results = [
+            {"id": "rec-a", "amount": 321, "currency": "EUR", "label": "invoice 1"},
+            {"id": "rec-b", "amount": 456, "currency": "EUR", "label": "invoice 2"},
+            {"from": "EUR", "to": "GBP", "rate": 0.8123},
+        ]
+        caller = AsyncMock(side_effect=results)
+        with patch.object(h, "call_tool", caller):
+            status, body = asyncio.run(handle_task(AUTH, request(task), ENV))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["output"]["data"], {"totalGbp": 631.16})
+        self.assertEqual([r["result"] for r in body["output"]["toolResults"]], results)
+        self.assertEqual(
+            [call.args[2] for call in caller.await_args_list],
+            [{"id": "rec-a"}, {"id": "rec-b"}, {"from": "EUR", "to": "GBP"}],
+        )
+        self.assertTrue(all(call.args[1] is task for call in caller.await_args_list))
+        self.assertTrue(h.is_built("use_tools"))
+
+    def test_use_tools_retries_503_and_maps_timeouts(self) -> None:
+        tool = {"name": "exchange_rate", "url": "https://tools.test/rate"}
+        task = {
+            "type": "use_tools",
+            "input": "Get the rate from USD to GBP with exchange_rate and return { rate }.",
+            "tools": [tool],
+            "challengeToken": "fresh-challenge-token",
+            "limits": {"timeoutMs": 50},
+        }
+        caller = AsyncMock(
+            side_effect=[
+                h.ToolCallError("exchange_rate", 503, "temporarily unavailable"),
+                h.ToolCallError("exchange_rate", 503, "temporarily unavailable"),
+                {"rate": 0.8},
+            ]
+        )
+        with patch.object(h, "call_tool", caller), patch.object(h.asyncio, "sleep", AsyncMock()):
+            status, body = asyncio.run(handle_task(AUTH, request(task), ENV))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["output"]["data"], {"rate": 0.8})
+        self.assertEqual(caller.await_count, 3)
+
+        caller = AsyncMock(side_effect=h.ToolCallError("exchange_rate", None, "exchange_rate did not answer within 50 ms"))
+        with patch.object(h, "call_tool", caller):
+            status, body = asyncio.run(handle_task(AUTH, request(task), ENV))
+        self.assertEqual((status, body["error"]["code"]), (504, "upstream_timeout"))
+        self.assertEqual(caller.await_count, 1)
+
+    def test_use_tools_rejects_missing_tools(self) -> None:
+        task = {"type": "use_tools", "input": "look something up"}
+        status, body = asyncio.run(handle_task(AUTH, request(task), ENV))
+        self.assertEqual((status, body["error"]["code"]), (400, "invalid_input"))
+
     def test_payment_workflow_uses_exact_task_values(self) -> None:
         recipient = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
         task = {

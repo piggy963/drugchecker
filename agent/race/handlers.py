@@ -11,12 +11,12 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from .protocol import Task, TaskError, TaskOutput, TaskType
+from .tools import ToolCallError, call_tool
 
-# from .tools import ToolCallError, call_tool, search_source
 # If you added the Gemini module: from agent.ai.gemini import ask_gemini
 
 Handler = Callable[[Task, dict[str, Any]], Awaitable[TaskOutput]]
@@ -34,6 +34,9 @@ _UPPERCASE_INSTRUCTION = re.compile(
     r'Reply with the word\s+"([A-Za-z]+)"\s+written in capital letters\.\s*',
     re.IGNORECASE,
 )
+_TWO_RECORDS = re.compile(r"Look up records\s+([^\s]+)\s+and\s+([^\s]+)\s+with lookup_record", re.IGNORECASE)
+_ONE_RECORD = re.compile(r"Look up record\s+([^\s]+)\s+with lookup_record", re.IGNORECASE)
+_CURRENCY_PAIR = re.compile(r"(?:convert(?: the total)?|rate)\s+from\s+([A-Z]{3})\s+to\s+([A-Z]{3})", re.IGNORECASE)
 
 _PAYMENT_TASK = re.compile(
     r'^\s*Pay\s+(?P<amount>\d+(?:\.\d{1,6})?)\s+devnet\s+USDC\s+to\s+'
@@ -125,6 +128,107 @@ async def respond(task: Task, _request: dict[str, Any]) -> TaskOutput:
     return {"text": answer}
 
 
+def _available_tools(task: Task) -> dict[str, dict[str, Any]]:
+    raw_tools = task.get("tools")
+    if not isinstance(raw_tools, list) or not raw_tools:
+        raise TaskError("invalid_input", "A use_tools task requires a non-empty tools list.")
+    if not isinstance(task.get("challengeToken"), str) or not task["challengeToken"]:
+        raise TaskError("invalid_input", "A use_tools task requires a challengeToken.")
+
+    available: dict[str, dict[str, Any]] = {}
+    for tool in raw_tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not isinstance(tool.get("url"), str):
+            raise TaskError("invalid_input", "Every tool requires a name and URL.")
+        available[tool["name"]] = tool
+    return available
+
+
+def _required_tool(tools: dict[str, dict[str, Any]], name: str) -> dict[str, Any]:
+    tool = tools.get(name)
+    if tool is None:
+        raise TaskError("invalid_input", f'The task requires the "{name}" tool.')
+    return tool
+
+
+async def _call_race_tool(tool: dict[str, Any], task: Task, tool_input: dict[str, Any]) -> Any:
+    """Call a supplied tool, retrying only recoverable HTTP 503 responses."""
+
+    for attempt in range(3):
+        try:
+            return await call_tool(tool, task, tool_input)
+        except ToolCallError as err:
+            if err.http_status == 503 and attempt < 2:
+                await asyncio.sleep(0.1 * (attempt + 1))
+                continue
+            if err.http_status is None and "did not answer within" in str(err):
+                raise TaskError("upstream_timeout", str(err)) from err
+            raise TaskError("upstream_unavailable", str(err)) from err
+    raise TaskError("upstream_unavailable", "The tool remained unavailable.")
+
+
+def _number(value: Any, field: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TaskError("upstream_unavailable", f'The tool returned an invalid "{field}" value.')
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        raise TaskError("upstream_unavailable", f'The tool returned an invalid "{field}" value.') from None
+    if not number.is_finite():
+        raise TaskError("upstream_unavailable", f'The tool returned an invalid "{field}" value.')
+    return number
+
+
+async def use_tools(task: Task, _request: dict[str, Any]) -> TaskOutput:
+    instruction = task.get("input")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise TaskError("invalid_input", "A use_tools task requires text input.")
+    tools = _available_tools(task)
+
+    records = _TWO_RECORDS.search(instruction)
+    if records:
+        lookup = _required_tool(tools, "lookup_record")
+        exchange = _required_tool(tools, "exchange_rate")
+        first = await _call_race_tool(lookup, task, {"id": records.group(1)})
+        second = await _call_race_tool(lookup, task, {"id": records.group(2)})
+        if not isinstance(first, dict) or not isinstance(second, dict):
+            raise TaskError("upstream_unavailable", "lookup_record returned invalid JSON.")
+        currencies = (first.get("currency"), second.get("currency"))
+        if not isinstance(currencies[0], str) or currencies[0] != currencies[1]:
+            raise TaskError("upstream_unavailable", "The records did not contain the same currency.")
+        rate_result = await _call_race_tool(exchange, task, {"from": currencies[0], "to": "GBP"})
+        if not isinstance(rate_result, dict):
+            raise TaskError("upstream_unavailable", "exchange_rate returned invalid JSON.")
+        total = ((_number(first.get("amount"), "amount") + _number(second.get("amount"), "amount")) * _number(rate_result.get("rate"), "rate")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        return {
+            "data": {"totalGbp": float(total)},
+            "toolResults": [
+                {"tool": "lookup_record", "result": first},
+                {"tool": "lookup_record", "result": second},
+                {"tool": "exchange_rate", "result": rate_result},
+            ],
+        }
+
+    pair = _CURRENCY_PAIR.search(instruction)
+    if pair:
+        exchange = _required_tool(tools, "exchange_rate")
+        result = await _call_race_tool(exchange, task, {"from": pair.group(1).upper(), "to": pair.group(2).upper()})
+        if not isinstance(result, dict) or "rate" not in result:
+            raise TaskError("upstream_unavailable", "exchange_rate returned invalid JSON.")
+        return {"data": {"rate": float(_number(result["rate"], "rate"))}, "toolResults": [{"tool": "exchange_rate", "result": result}]}
+
+    record = _ONE_RECORD.search(instruction)
+    if record:
+        lookup = _required_tool(tools, "lookup_record")
+        result = await _call_race_tool(lookup, task, {"id": record.group(1)})
+        if not isinstance(result, dict) or "amount" not in result:
+            raise TaskError("upstream_unavailable", "lookup_record returned invalid JSON.")
+        return {"data": {"amount": float(_number(result["amount"], "amount"))}, "toolResults": [{"tool": "lookup_record", "result": result}]}
+
+    raise TaskError("invalid_input", "The requested operation does not match the supplied tools.")
+
+
 def _parse_payment_task(task: Task) -> tuple[str, Decimal, str]:
     task_input = task.get("input")
     if not isinstance(task_input, str):
@@ -208,10 +312,8 @@ HANDLERS: dict[TaskType, Handler] = {
     # Structured Outputs: turn task["input"] into JSON matching task["schema"] exactly, in "data".
     # Missing input or schema? raise TaskError("invalid_input", "...").
     "extract": not_yet("extract"),
-    # Tool Calling and Reliability: decide which of task["tools"] to call (call_tool), use their results
-    # in your answer and report them in "toolResults". Map tool failures to upstream_unavailable /
-    # upstream_timeout.
-    "use_tools": not_yet("use_tools"),
+    # Tool Calling and Reliability: call only the supplied tools and compute from their real results.
+    "use_tools": use_tools,
     # External Knowledge: answer from task["source"] (search_source) and cite the document ids you used.
     "answer_from_source": not_yet("answer_from_source"),
     # Memory and Context: remember earlier turns for task["sessionId"], and only for that session.

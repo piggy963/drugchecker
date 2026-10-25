@@ -156,6 +156,8 @@ def register(app: FastAPI) -> None:
 
 **Payment race stage:** the `run_workflow` handler accepts the verifier's narrowly formatted devnet USDC instruction, enforces both its `maxSpendUsd` limit and this agent's spending policy, sends the transfer with the exact memo, waits for confirmation, and returns `output.data.signature`. On the deployed service, set `AGENT_PRIVATE_KEY` to a throwaway Solana devnet keypair and fund its public address with both devnet SOL and devnet USDC. The default `AGENT_BUDGET_USD=1.00` and `MAX_PAYMENT_USD=0.10` allow the verifier's `$0.01` payment. No Gemini key is needed for this stage.
 
+**Tool-calling race stage:** the `use_tools` handler calls the tool URLs supplied in each task with the task's challenge token, uses both record results and the returned exchange rate to calculate `output.data.totalGbp`, and reports only the actual responses in `output.toolResults`. Recoverable HTTP 503 failures are retried twice; timeouts and persistent failures become ASRP errors rather than invented answers.
+
 ### Deploy for the competition (Vercel)
 
 The competition platform verifies your app but does not host it. This repository is configured for Vercel's native FastAPI runtime through `pyproject.toml` and `vercel.json`.
