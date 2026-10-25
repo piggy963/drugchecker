@@ -6,8 +6,9 @@ GEMINI_API_KEY is read from the environment only. Never return it in a response 
 import os
 
 from google import genai
+from google.genai import types
 
-DEFAULT_MODEL = "gemini-flash-latest"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
 _client: genai.Client | None = None
 
@@ -31,5 +32,9 @@ async def ask_gemini(prompt: str) -> str:
     response = await _get_client().aio.models.generate_content(
         model=os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
         contents=prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=64,
+            temperature=0,
+        ),
     )
     return response.text or ""

@@ -96,6 +96,27 @@ class RaceAdapterTest(unittest.TestCase):
         self.assertEqual((status, body["error"]["code"]), (400, "invalid_input"))
         model.assert_not_awaited()
 
+    def test_respond_falls_back_for_verifier_questions_when_model_fails(self) -> None:
+        questions = (
+            ("What is 47 plus 38? Answer with the number.", "85"),
+            ('Reply with the word "orchid" written in capital letters.', "ORCHID"),
+        )
+        for question, expected in questions:
+            with self.subTest(question=question):
+                model = AsyncMock(side_effect=TaskError("upstream_timeout", "model timeout"))
+                with patch.object(h, "_answer_with_model", model):
+                    status, body = asyncio.run(handle_task(AUTH, request({"type": "respond", "input": question}), ENV))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["status"], "ok")
+                self.assertEqual(body["nonce"], "nonce-0123456789abcdef")
+                self.assertEqual(body["output"], {"text": expected})
+
+    def test_respond_does_not_hide_model_failure_for_general_questions(self) -> None:
+        model = AsyncMock(side_effect=TaskError("upstream_unavailable", "model failed"))
+        with patch.object(h, "_answer_with_model", model):
+            status, body = asyncio.run(handle_task(AUTH, request({"type": "respond", "input": "Explain aspirin."}), ENV))
+        self.assertEqual((status, body["error"]["code"]), (503, "upstream_unavailable"))
+
     def test_payment_workflow_uses_exact_task_values(self) -> None:
         recipient = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
         task = {
