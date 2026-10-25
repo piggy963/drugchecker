@@ -33,7 +33,7 @@ async def ask_gemini(prompt: str) -> str:
         model=os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
-            max_output_tokens=64,
+            max_output_tokens=1024,
             temperature=0,
         ),
     )
