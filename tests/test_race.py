@@ -6,6 +6,7 @@ They check the envelope, the token and the nonce, not your AI logic: the race ve
 import asyncio
 import unittest
 import json
+from unittest.mock import AsyncMock, patch
 from typing import Any
 
 import httpx
@@ -70,6 +71,44 @@ class RaceAdapterTest(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertIn('doesn\'t handle "converse" tasks yet', body["error"]["message"])
         self.assertFalse(h.is_built("converse"))
+
+    def test_payment_workflow_uses_exact_task_values(self) -> None:
+        recipient = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+        task = {
+            "type": "run_workflow",
+            "input": (
+                f'Pay 0.01 devnet USDC to {recipient} with the memo "agent-studio-abc123". '
+                'Return { "signature": "<transaction signature>" } in output.data.'
+            ),
+            "limits": {"maxSpendUsd": 0.01},
+        }
+        signature = "4j5WT85x2o92tGZPFKyUaEzV2AD2LeZP9x7TLmQmwWkQEwxbikipq4bXvNeTJxdGRPfAB654nJg7av2r3khyhC5J"
+        payer = AsyncMock(return_value=signature)
+        with patch.object(h, "_send_devnet_usdc", payer):
+            status, body = asyncio.run(handle_task(AUTH, request(task), ENV))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["output"], {"data": {"signature": signature}})
+        payer.assert_awaited_once_with(recipient, h.Decimal("0.01"), "agent-studio-abc123")
+        self.assertTrue(h.is_built("run_workflow"))
+
+    def test_payment_workflow_rejects_malformed_or_over_limit_tasks(self) -> None:
+        payer = AsyncMock()
+        with patch.object(h, "_send_devnet_usdc", payer):
+            status, body = asyncio.run(handle_task(AUTH, request({"type": "run_workflow", "input": "pay someone"}), ENV))
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_input"))
+
+            recipient = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+            task = {
+                "type": "run_workflow",
+                "input": (
+                    f'Pay 0.02 devnet USDC to {recipient} with the memo "agent-studio-abc123". '
+                    'Return { "signature": "<transaction signature>" } in output.data.'
+                ),
+                "limits": {"maxSpendUsd": 0.01},
+            }
+            status, body = asyncio.run(handle_task(AUTH, request(task), ENV))
+            self.assertEqual((status, body["error"]["code"]), (422, "limit_exceeded"))
+        payer.assert_not_awaited()
 
 
 if __name__ == "__main__":
